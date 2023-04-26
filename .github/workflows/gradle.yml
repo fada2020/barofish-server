@@ -15,20 +15,87 @@ on:
 
 permissions:
   contents: read
-
+env:
+  AWS_REGION: ap-northeast-2
+  ECR_REPOSITORY: baro-server
+  ECS_SERVICE: baro-server-service
+  ECS_CLUSTER: baro-server-cluster
+  ECS_TASK_DEFINITION: baro-server-definition
+  CONTAINER_NAME: baro-server-latest
+  ECR_REGISTRY: ${{ secrets.ECR_REGISTRY }}
+  ECR_REPOSITORY_NAME: ${{ secrets.ECR_REPOSITORY_NAME }}
+  SERVICE_TAG: . # Dockerfile의 경로
+  IMAGE_TAG: ${{ secrets.IMAGE_TAG }} # Github가 제공하는 SHA 암호화 사용
 jobs:
   build:
 
     runs-on: ubuntu-latest
 
     steps:
-    - uses: actions/checkout@v3
-    - name: Set up JDK 11
-      uses: actions/setup-java@v3
-      with:
-        java-version: '11'
-        distribution: 'temurin'
-    - name: Build with Gradle
-      uses: gradle/gradle-build-action@67421db6bd0bf253fb4bd25b31ebb98943c375e1
-      with:
-        arguments: build
+      - name: Checkout
+        uses: actions/checkout@v3
+
+      - name: Configure AWS credentials For Devzone
+        uses: aws-actions/configure-aws-credentials@v1
+        with:
+          # Github Repository Secrets에 값 등록 필요!
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v1
+
+      - name: Install JDK 17
+        uses: actions/setup-java@v2
+        with:
+          distribution: 'temurin'
+          java-version: 17
+          cache: 'gradle' # https://github.com/actions/setup-java#caching-packages-dependencies
+
+      - name: make application-db.yml
+        run: |
+          # create application-db.yml
+          pwd
+          cd ./src/main/resources
+          # application-database.yml 파일 생성
+          touch ./application-db.yml
+          # GitHub-Actions 에서 설정한 값을 application-db.yml 파일에 쓰기
+          echo "${{ secrets.DB_YML }}" >> ./application-db.yml
+        shell: bash
+      ## gradle build
+      - name: Build with Gradle # 실제 application build(-x 옵션을 통해 test는 제외)
+        run: |
+          chmod +x ./gradlew
+          ./gradlew build -x test
+
+      - name: Build, tag, and push image to Amazon ECR
+        id: build-image
+        run: |
+          # Build a docker container and
+          # push it to ECR so that it can
+          # be deployed to ECS.
+          docker build -t baro-server .
+          docker tag baro-server:latest 135424334978.dkr.ecr.ap-northeast-2.amazonaws.com/baro-server:latest
+          docker push 135424334978.dkr.ecr.ap-northeast-2.amazonaws.com/baro-server:latest
+          echo "::set-output name=image::${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY_NAME }}:${{ env.IMAGE_TAG }}"
+
+      - name: Fill in the new image ID in the Amazon ECS task definition
+        id: task-def
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: task-definition.json
+          container-name: ${{ env.CONTAINER_NAME }}
+          image: ${{ env.ECR_REGISTRY}}/${{ env.ECR_REPOSITORY_NAME }}:${{ env.IMAGE_TAG }}
+      ## https://github.com/well-balanced/ecs-tutorial/blob/main/task-definition.json
+      - name: Deploy Amazon ECS task definition
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v1
+        with:
+          task-definition: task-definition.json
+          service: ${{ env.ECS_SERVICE }}
+          cluster: ${{ env.ECS_CLUSTER }}
+          wait-for-service-stability: true
+
+        
+  
